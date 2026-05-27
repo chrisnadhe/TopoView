@@ -102,7 +102,6 @@ http://localhost:8000
 ## Next Steps (roadmap)
 
 - [ ] Live device polling via SSH (Netmiko)
-- [ ] Interface status monitoring (up/down in real-time)
 - [ ] VLAN / routing protocol info overlay
 - [ ] Save / load topology sessions
 - [ ] Export to draw.io XML

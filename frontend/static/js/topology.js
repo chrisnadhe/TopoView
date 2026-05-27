@@ -155,14 +155,16 @@ function renderTopology(data) {
   const linkLines = linkG.selectAll("line")
     .data(links)
     .join("line")
-    .attr("class", "link-line");
+    .attr("class", "link-line")
+    .attr("stroke-dasharray", d => d.link_type === "subnet" ? "4,4" : "none")
+    .attr("stroke-width", d => d.link_type === "cdp" ? 2 : 1.5);
 
   // Link labels (subnet)
   const linkLabels = linkG.selectAll("text")
     .data(links)
     .join("text")
     .attr("class", "link-label")
-    .text(d => d.subnet || "");
+    .text(d => d.link_type === "cdp" ? "CDP/LLDP" : d.subnet || "");
 
   // Draw nodes
   const nodeG = zoomG.append("g").attr("class", "nodes");

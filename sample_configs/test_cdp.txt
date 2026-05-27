@@ -1,0 +1,15 @@
+hostname SW-Core
+!
+interface GigabitEthernet0/0
+ description Link to Firewall
+ ip address 10.0.0.1 255.255.255.252
+!
+interface GigabitEthernet0/1
+ description Link to R1
+!
+! (Imagine standard config ends here, and the user appended CDP output)
+!
+show cdp neighbors
+Device ID        Local Intrfce     Holdtme    Capability  Platform  Port ID
+FW1.domain.com   Gig 0/0           120        R I         C2900     Gig 0/1
+R1               Gig 0/1           120        S I         C3560     Fa0/1

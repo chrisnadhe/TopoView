@@ -21,11 +21,19 @@ class Interface:
 
 
 @dataclass
+class Neighbor:
+    local_interface: str
+    remote_device: str
+    remote_interface: str
+
+
+@dataclass
 class Device:
     hostname: str
     vendor: str  # "cisco" | "juniper" | "unknown"
     device_type: str  # "router" | "switch" | "firewall" | "unknown"
     interfaces: list[Interface] = field(default_factory=list)
+    neighbors: list[Neighbor] = field(default_factory=list)
     filename: str = ""
 
 
@@ -104,11 +112,24 @@ def parse_cisco(content: str, filename: str = "") -> Device:
         if iface.ip_address or iface.description:
             interfaces.append(iface)
 
+    # Parse CDP/LLDP Neighbors
+    neighbors = []
+    cdp_pattern = re.compile(r"^([A-Za-z0-9\-\.]+)\s+([A-Za-z]+\s*[\d\/]+)\s+\d+\s+.*?\s+([A-Za-z]+\s*[\d\/]+)$", re.MULTILINE)
+    for m in cdp_pattern.finditer(content):
+        # Removing domain name if present in neighbor hostname
+        remote_device = m.group(1).split(".")[0]
+        neighbors.append(Neighbor(
+            local_interface=m.group(2).strip(),
+            remote_device=remote_device,
+            remote_interface=m.group(3).strip()
+        ))
+
     return Device(
         hostname=hostname,
         vendor="cisco",
         device_type=device_type,
         interfaces=interfaces,
+        neighbors=neighbors,
         filename=filename
     )
 
@@ -139,11 +160,23 @@ def parse_juniper(content: str, filename: str = "") -> Device:
         except Exception:
             pass
 
+    # Parse LLDP Neighbors
+    neighbors = []
+    lldp_pattern = re.compile(r"^([a-z]+\-\d+\/\d+\/\d+(?:\.\d+)?|[a-z]+\-\d+\/\d+\/\d+|[a-z]+\-\d+\/\d+)\s+\S+\s+(?:[0-9a-fA-F:]+)\s+(\S+)\s+([A-Za-z0-9\-\.]+)$", re.MULTILINE)
+    for m in lldp_pattern.finditer(content):
+        remote_device = m.group(3).split(".")[0]
+        neighbors.append(Neighbor(
+            local_interface=m.group(1).strip(),
+            remote_device=remote_device,
+            remote_interface=m.group(2).strip()
+        ))
+
     return Device(
         hostname=hostname,
         vendor="juniper",
         device_type=device_type,
         interfaces=interfaces,
+        neighbors=neighbors,
         filename=filename
     )
 
@@ -161,18 +194,41 @@ def parse_config(content: str, filename: str = "") -> Device:
 
 def infer_links(devices: list[Device]) -> list[dict]:
     """
-    Match interfaces that share the same /30 or /24 subnet.
-    Returns a list of link dicts: {source, target, source_iface, target_iface, subnet}
+    Match interfaces that share the same /30 or /24 subnet,
+    and incorporate explicit CDP/LLDP neighbor links.
     """
-    # Build: subnet -> [(device, interface)]
+    links = []
+    seen = set()
+    
+    # 1. Add Explicit CDP/LLDP Links
+    device_map = {d.hostname.lower(): d for d in devices}
+    for dev in devices:
+        for nbr in dev.neighbors:
+            target_host = nbr.remote_device.lower()
+            if target_host in device_map:
+                dev_b = device_map[target_host]
+                key = tuple(sorted([dev.hostname, dev_b.hostname]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                links.append({
+                    "source": dev.hostname,
+                    "target": dev_b.hostname,
+                    "source_iface": nbr.local_interface,
+                    "target_iface": nbr.remote_interface,
+                    "source_ip": "",
+                    "target_ip": "",
+                    "subnet": "CDP/LLDP",
+                    "link_type": "cdp"
+                })
+
+    # 2. Add Subnet Links (Fallback)
     subnet_map: dict[str, list[tuple[Device, Interface]]] = {}
     for dev in devices:
         for iface in dev.interfaces:
             if iface.subnet:
                 subnet_map.setdefault(iface.subnet, []).append((dev, iface))
 
-    links = []
-    seen = set()
     for subnet, endpoints in subnet_map.items():
         if len(endpoints) < 2:
             continue
@@ -180,7 +236,12 @@ def infer_links(devices: list[Device]) -> list[dict]:
             for j in range(i + 1, len(endpoints)):
                 dev_a, iface_a = endpoints[i]
                 dev_b, iface_b = endpoints[j]
-                key = tuple(sorted([dev_a.hostname, dev_b.hostname, subnet]))
+                
+                # Use just the hostnames for the key to avoid duplicating a link 
+                # if they are already connected via CDP on this or another interface.
+                # If you want multiple links between same hosts, include the subnet in the key.
+                # For network topology, typically 1 link between a pair is fine unless explicitly plotting all wires.
+                key = tuple(sorted([dev_a.hostname, dev_b.hostname]))
                 if key in seen:
                     continue
                 seen.add(key)
@@ -192,6 +253,7 @@ def infer_links(devices: list[Device]) -> list[dict]:
                     "source_ip": iface_a.ip_address,
                     "target_ip": iface_b.ip_address,
                     "subnet": subnet,
+                    "link_type": "subnet"
                 })
 
     return links
