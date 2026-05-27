@@ -1248,9 +1248,108 @@ function updateLayoutButtons() {
   });
 }
 
-function exportSVG() {
+/**
+ * getStyledSVGData — serializes the topology SVG with all relevant CSS
+ * rules inlined into a <defs><style> block so that fonts, colors, and
+ * stroke styles are preserved in SVG / PNG / PDF exports.
+ */
+function getStyledSVGData() {
   const svgEl = document.getElementById("topology");
-  const data = new XMLSerializer().serializeToString(svgEl);
+
+  // Collect matching CSS rules from the document's stylesheets
+  const relevantSelectors = [
+    "node-label", "link-line", "link-label", "link-port-label",
+    "manual-link", "node-circle", "device-icon", "node-note",
+    "node-stencil-img", "node-custom-img"
+  ];
+
+  let cssText = "";
+
+  // Hard-coded fallback styles (matches the CSS in index.html's <style>)
+  // This guarantees correct output even if CSSOM is blocked by Tailwind's JIT.
+  const isDark = document.documentElement.classList.contains("dark");
+  cssText += `
+    .node-label {
+      font-size: 11px;
+      fill: ${isDark ? "#cbd5e1" : "#475569"};
+      font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+      text-anchor: middle;
+      pointer-events: none;
+    }
+    .link-line {
+      stroke: ${isDark ? "#475569" : "#cbd5e1"};
+      stroke-width: 1.5;
+      opacity: 0.6;
+    }
+    .link-line.manual-link {
+      stroke: #f59e0b;
+      stroke-width: 2;
+      opacity: 1;
+    }
+    .link-label {
+      font-size: 9px;
+      fill: ${isDark ? "#64748b" : "#94a3b8"};
+      font-family: ui-monospace, monospace;
+      text-anchor: middle;
+      pointer-events: none;
+    }
+    .link-port-label, .port-label-src, .port-label-dst {
+      font-size: 8.5px;
+      fill: ${isDark ? "#3b82f6" : "#60a5fa"};
+      font-family: ui-monospace, monospace;
+      font-style: italic;
+      text-anchor: middle;
+      pointer-events: none;
+      opacity: 0.85;
+    }
+    .node-circle {
+      cursor: pointer;
+    }
+    .node-circle.selected {
+      stroke-width: 3;
+      stroke: #0ea5e9;
+    }
+    .node-note {
+      pointer-events: none;
+    }
+  `;
+
+  // Also attempt to collect computed rules from CSSOM (works with plain CSS)
+  try {
+    for (const sheet of document.styleSheets) {
+      try {
+        for (const rule of sheet.cssRules || []) {
+          const text = rule.selectorText || "";
+          if (relevantSelectors.some(sel => text.includes(sel))) {
+            cssText += rule.cssText + "\n";
+          }
+        }
+      } catch (e) { /* cross-origin sheet, skip */ }
+    }
+  } catch (e) { /* ignore */ }
+
+  // Clone SVG to avoid mutating the live DOM
+  const clone = svgEl.cloneNode(true);
+
+  // Inject styles into <defs>
+  let defs = clone.querySelector("defs");
+  if (!defs) {
+    defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+    clone.insertBefore(defs, clone.firstChild);
+  }
+  const styleEl = document.createElementNS("http://www.w3.org/2000/svg", "style");
+  styleEl.textContent = cssText;
+  defs.insertBefore(styleEl, defs.firstChild);
+
+  // Ensure explicit width/height so rasterisation tools know the canvas size
+  clone.setAttribute("width",  svgEl.clientWidth  || window.innerWidth);
+  clone.setAttribute("height", svgEl.clientHeight || window.innerHeight);
+
+  return new XMLSerializer().serializeToString(clone);
+}
+
+function exportSVG() {
+  const data = getStyledSVGData();
   const blob = new Blob([data], { type: "image/svg+xml" });
   const url  = URL.createObjectURL(blob);
   const a = Object.assign(document.createElement("a"), { href: url, download: "topology.svg" });
@@ -1258,21 +1357,23 @@ function exportSVG() {
   URL.revokeObjectURL(url);
 }
 
+
 function getSVGImage() {
   return new Promise((resolve, reject) => {
     const svgEl = document.getElementById("topology");
-    const data = new XMLSerializer().serializeToString(svgEl);
+    // Use styled data so fonts/colors are embedded in the rasterized image
+    const data = getStyledSVGData();
     const blob = new Blob([data], { type: "image/svg+xml;charset=utf-8" });
     const url = URL.createObjectURL(blob);
-    
+
     const img = new Image();
     img.onload = () => {
       const canvas = document.createElement("canvas");
-      canvas.width = svgEl.clientWidth || window.innerWidth;
+      canvas.width  = svgEl.clientWidth  || window.innerWidth;
       canvas.height = svgEl.clientHeight || window.innerHeight;
       const ctx = canvas.getContext("2d");
-      
-      // Fill background depending on theme
+
+      // Fill background matching current theme
       ctx.fillStyle = document.documentElement.classList.contains("dark") ? "#0f172a" : "#f8fafc";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(img, 0, 0);
