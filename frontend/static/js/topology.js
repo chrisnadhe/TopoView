@@ -163,7 +163,15 @@ function renderTopology(data) {
   document.getElementById("btnZoomIn").onclick  = () => svg.transition().call(zoom.scaleBy, 1.3);
   document.getElementById("btnZoomOut").onclick = () => svg.transition().call(zoom.scaleBy, 0.77);
   document.getElementById("btnFit").onclick     = () => svg.transition().call(zoom.transform, d3.zoomIdentity);
-  document.getElementById("btnExport").onclick  = exportSVG;
+  
+  const btnExportSVG = document.getElementById("btnExportSVG");
+  if (btnExportSVG) btnExportSVG.onclick = exportSVG;
+  const btnExportPNG = document.getElementById("btnExportPNG");
+  if (btnExportPNG) btnExportPNG.onclick = exportPNG;
+  const btnExportPDF = document.getElementById("btnExportPDF");
+  if (btnExportPDF) btnExportPDF.onclick = exportPDF;
+  const btnExportDrawio = document.getElementById("btnExportDrawio");
+  if (btnExportDrawio) btnExportDrawio.onclick = exportDrawio;
 
   // ── Link Edit Mode toggle ──────────────────────────────────
   const btnLinkEdit = document.getElementById("btnLinkEdit");
@@ -1246,6 +1254,143 @@ function exportSVG() {
   const blob = new Blob([data], { type: "image/svg+xml" });
   const url  = URL.createObjectURL(blob);
   const a = Object.assign(document.createElement("a"), { href: url, download: "topology.svg" });
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function getSVGImage() {
+  return new Promise((resolve, reject) => {
+    const svgEl = document.getElementById("topology");
+    const data = new XMLSerializer().serializeToString(svgEl);
+    const blob = new Blob([data], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = svgEl.clientWidth || window.innerWidth;
+      canvas.height = svgEl.clientHeight || window.innerHeight;
+      const ctx = canvas.getContext("2d");
+      
+      // Fill background depending on theme
+      ctx.fillStyle = document.documentElement.classList.contains("dark") ? "#0f172a" : "#f8fafc";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      resolve(canvas);
+    };
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+async function exportPNG() {
+  try {
+    const canvas = await getSVGImage();
+    const dataUrl = canvas.toDataURL("image/png");
+    const a = Object.assign(document.createElement("a"), { href: dataUrl, download: "topology.png" });
+    a.click();
+  } catch (err) {
+    console.error("Failed to export PNG:", err);
+    alert("Error generating PNG. Please check the console.");
+  }
+}
+
+async function exportPDF() {
+  try {
+    const canvas = await getSVGImage();
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.95);
+    const { jsPDF } = window.jspdf;
+    
+    // Auto-detect orientation
+    const orientation = canvas.width > canvas.height ? "landscape" : "portrait";
+    const pdf = new jsPDF(orientation, "px", [canvas.width, canvas.height]);
+    pdf.addImage(dataUrl, "JPEG", 0, 0, canvas.width, canvas.height);
+    pdf.save("topology.pdf");
+  } catch (err) {
+    console.error("Failed to export PDF:", err);
+    alert("Error generating PDF. Please check the console.");
+  }
+}
+
+function exportDrawio() {
+  if (!allNodesData.length) return;
+  
+  let xml = `<mxGraphModel dx="1000" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+`;
+
+  // Draw nodes
+  allNodesData.forEach(n => {
+    const r = RADIUS[n.device_type] || 18;
+    const w = r * 2.5; // Slightly wider for text
+    const h = r * 2.5;
+    
+    // Basic mxGraph shape mapping
+    let shape = "ellipse";
+    if (n.device_type === "switch") shape = "rounded=1";
+    else if (n.device_type === "firewall") shape = "hexagon";
+    
+    const label = (n.label || n.hostname || n.id).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const cleanId = String(n.id).replace(/[^a-zA-Z0-9_-]/g, "_");
+    
+    // Custom icon as image style
+    let style = `${shape};whiteSpace=wrap;html=1;align=center;verticalAlign=bottom;spacingTop=${h};fontColor=#333333;`;
+    const effIcon = n.customIcon || typeIcons[n.device_type];
+    if (effIcon) {
+      style += `shape=image;image=${effIcon};`;
+    } else {
+       style += `fillColor=#ffffff;strokeColor=${COLOR[n.device_type] || "#999999"};strokeWidth=2;`;
+    }
+    
+    xml += `    <mxCell id="node_${cleanId}" value="${label}" style="${style}" vertex="1" parent="1">
+      <mxGeometry x="${n.x - w/2}" y="${n.y - h/2}" width="${w}" height="${h}" as="geometry" />
+    </mxCell>
+`;
+  });
+
+  // Draw links
+  const allLinks = [];
+  if (allNodesData.length > 0) {
+    const manualMapped = manualLinks.map(l => ({
+      ...l,
+      source: typeof l.source === "object" ? l.source : allNodesData.find(n => n.id === l.source),
+      target: typeof l.target === "object" ? l.target : allNodesData.find(n => n.id === l.target),
+    }));
+    allLinks.push(...parsedLinks, ...manualMapped);
+  }
+
+  allLinks.forEach((l, i) => {
+    if (!l.source || !l.target) return;
+    const src = typeof l.source === "object" ? l.source.id : l.source;
+    const tgt = typeof l.target === "object" ? l.target.id : l.target;
+    const srcClean = String(src).replace(/[^a-zA-Z0-9_-]/g, "_");
+    const tgtClean = String(tgt).replace(/[^a-zA-Z0-9_-]/g, "_");
+    
+    // Edge styles
+    let edgeStyle = "edgeStyle=none;html=1;endArrow=none;endFill=0;";
+    if (l.link_type === "subnet") {
+      edgeStyle += "dashed=1;dashPattern=1 2;strokeColor=#64748b;strokeWidth=1;";
+    } else if (l.link_type === "manual") {
+      edgeStyle += "dashed=1;dashPattern=8 8;strokeColor=#f59e0b;strokeWidth=2;";
+    } else {
+      edgeStyle += "strokeColor=#64748b;strokeWidth=2;";
+    }
+
+    xml += `    <mxCell id="edge_${i}" style="${edgeStyle}" edge="1" parent="1" source="node_${srcClean}" target="node_${tgtClean}">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+`;
+  });
+
+  xml += `  </root>
+</mxGraphModel>`;
+
+  const blob = new Blob([xml], { type: "application/xml" });
+  const url = URL.createObjectURL(blob);
+  const a = Object.assign(document.createElement("a"), { href: url, download: "topology.drawio" });
   a.click();
   URL.revokeObjectURL(url);
 }
