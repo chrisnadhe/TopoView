@@ -40,6 +40,9 @@ let portLabelsDstSel = null;
 // Global type-level stencil icons (apply to all nodes of that type unless overridden per-node)
 const typeIcons = { router: null, firewall: null, switch: null, unknown: null };
 
+// Current layout mode: "force" | "hierarchical" | "circular" | "free"
+let layoutMode = "force";
+
 // ── DOM refs ───────────────────────────────────────────────────
 const fileInput     = document.getElementById("fileInput");
 const uploadZone    = document.getElementById("uploadZone");
@@ -271,21 +274,28 @@ function renderTopology(data) {
 
   nodeGroupsSel = nodeGroups;
 
-  // Drag behaviour (normal mode)
+  // Drag behaviour — adapts to current layoutMode
   const normalDrag = d3.drag()
     .on("start", (e, d) => {
       if (linkEditMode) return;
-      if (!e.active) simulation.alphaTarget(0.3).restart();
+      if (layoutMode === "force") {
+        if (!e.active) simulation.alphaTarget(0.3).restart();
+      }
       d.fx = d.x; d.fy = d.y;
     })
     .on("drag", (e, d) => {
       if (linkEditMode) return;
       d.fx = e.x; d.fy = e.y;
+      d.x  = e.x; d.y  = e.y;
+      if (layoutMode !== "force") applyTick(); // manual position update
     })
     .on("end", (e, d) => {
       if (linkEditMode) return;
-      if (!e.active) simulation.alphaTarget(0);
-      d.fx = null; d.fy = null;
+      if (layoutMode === "force") {
+        if (!e.active) simulation.alphaTarget(0);
+        d.fx = null; d.fy = null; // release pin in force mode
+      }
+      // non-force modes: keep fx/fy so node stays where dropped
     });
 
   nodeGroups.call(normalDrag);
@@ -376,44 +386,11 @@ function renderTopology(data) {
     .attr("pointer-events", "none")
     .text(d => d.note ? `📝 ${d.note.slice(0, 20)}${d.note.length > 20 ? "…" : ""}` : "");
 
-  // Simulation tick
-  simulation.on("tick", () => {
-    const allLinks = buildAllLinks();
+  // Simulation tick — calls shared applyTick()
+  simulation.on("tick", applyTick);
 
-    linkG.selectAll("line.link-line")
-      .attr("x1", d => d.source.x).attr("y1", d => d.source.y)
-      .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
-
-    // Midpoint labels
-    linkG.selectAll("text.link-label")
-      .attr("x", d => (d.source.x + d.target.x) / 2)
-      .attr("y", d => (d.source.y + d.target.y) / 2 - 4);
-
-    // Port labels at 1/4 and 3/4 positions
-    linkG.selectAll("text.port-label-src").each(function(d) {
-      const sx = d.source.x, sy = d.source.y, tx = d.target.x, ty = d.target.y;
-      const angle = Math.atan2(ty - sy, tx - sx);
-      const offset = 12; // perpendicular offset
-      const px = sx + (tx - sx) * 0.2;
-      const py = sy + (ty - sy) * 0.2;
-      d3.select(this)
-        .attr("x", px + Math.sin(angle) * offset)
-        .attr("y", py - Math.cos(angle) * offset);
-    });
-
-    linkG.selectAll("text.port-label-dst").each(function(d) {
-      const sx = d.source.x, sy = d.source.y, tx = d.target.x, ty = d.target.y;
-      const angle = Math.atan2(ty - sy, tx - sx);
-      const offset = 12;
-      const px = sx + (tx - sx) * 0.8;
-      const py = sy + (ty - sy) * 0.8;
-      d3.select(this)
-        .attr("x", px + Math.sin(angle) * offset)
-        .attr("y", py - Math.cos(angle) * offset);
-    });
-
-    nodeGroups.attr("transform", d => `translate(${d.x},${d.y})`);
-  });
+  // Wire layout mode buttons
+  initLayoutButtons();
 
   // Deselect on canvas click
   svg.on("click", () => {
@@ -1043,6 +1020,225 @@ function updateSymbolRow(type) {
   }
 }
 
+
+// ── applyTick ─────────────────────────────────────────────────
+// Shared position updater called both from simulation.on("tick")
+// and manually during drag in non-force layout modes.
+function applyTick() {
+  if (!linkG) return;
+
+  linkG.selectAll("line.link-line")
+    .attr("x1", d => d.source.x).attr("y1", d => d.source.y)
+    .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
+
+  linkG.selectAll("text.link-label")
+    .attr("x", d => (d.source.x + d.target.x) / 2)
+    .attr("y", d => (d.source.y + d.target.y) / 2 - 4);
+
+  linkG.selectAll("text.port-label-src").each(function(d) {
+    const sx = d.source.x, sy = d.source.y, tx = d.target.x, ty = d.target.y;
+    const angle = Math.atan2(ty - sy, tx - sx);
+    const offset = 12;
+    const px = sx + (tx - sx) * 0.2;
+    const py = sy + (ty - sy) * 0.2;
+    d3.select(this)
+      .attr("x", px + Math.sin(angle) * offset)
+      .attr("y", py - Math.cos(angle) * offset);
+  });
+
+  linkG.selectAll("text.port-label-dst").each(function(d) {
+    const sx = d.source.x, sy = d.source.y, tx = d.target.x, ty = d.target.y;
+    const angle = Math.atan2(ty - sy, tx - sx);
+    const offset = 12;
+    const px = sx + (tx - sx) * 0.8;
+    const py = sy + (ty - sy) * 0.8;
+    d3.select(this)
+      .attr("x", px + Math.sin(angle) * offset)
+      .attr("y", py - Math.cos(angle) * offset);
+  });
+
+  if (nodeGroupsSel) {
+    nodeGroupsSel.attr("transform", d => `translate(${d.x},${d.y})`);
+  }
+}
+
+// ── Layout Modes ───────────────────────────────────────────────
+
+/**
+ * setLayout — switches between force / hierarchical / circular / free modes.
+ * Smoothly animates nodes to their new positions for static layouts.
+ */
+function setLayout(mode) {
+  layoutMode = mode;
+  updateLayoutButtons();
+  if (!allNodesData.length || !simulation) return;
+
+  const svgEl = document.getElementById("topology");
+  const W = svgEl.clientWidth  || window.innerWidth  - 320;
+  const H = svgEl.clientHeight || window.innerHeight;
+
+  if (mode === "force") {
+    // Release all pins → let simulation run freely again
+    allNodesData.forEach(n => { n.fx = null; n.fy = null; });
+    simulation
+      .force("charge", d3.forceManyBody().strength(-400))
+      .force("link",   d3.forceLink(parsedLinks).id(d => d.id).distance(130))
+      .force("center", d3.forceCenter(W / 2, H / 2))
+      .force("collision", d3.forceCollide().radius(d => (RADIUS[d.device_type] || 18) + 22))
+      .alpha(0.8).restart();
+
+  } else if (mode === "hierarchical") {
+    simulation.stop();
+    computeHierarchicalPositions(allNodesData, [...parsedLinks, ...manualLinks], W, H);
+    animateToPositions();
+
+  } else if (mode === "circular") {
+    simulation.stop();
+    computeCircularPositions(allNodesData, W, H);
+    animateToPositions();
+
+  } else if (mode === "free") {
+    // Pin every node at its current position — sim stops affecting anything
+    allNodesData.forEach(n => { n.fx = n.x; n.fy = n.y; });
+    simulation.stop();
+  }
+}
+
+/**
+ * animateToPositions — smoothly transitions nodes from their current x/y to
+ * the fx/fy target positions set by a layout computation function.
+ */
+function animateToPositions() {
+  if (!nodeGroupsSel) return;
+
+  // Set x/y = fx/fy so the tick reads correct values immediately
+  allNodesData.forEach(n => { n.x = n.fx; n.y = n.fy; });
+
+  nodeGroupsSel
+    .transition().duration(600).ease(d3.easeCubicInOut)
+    .attr("transform", d => `translate(${d.fx},${d.fy})`);
+
+  // Animate links in parallel
+  if (linkG) {
+    linkG.selectAll("line.link-line")
+      .transition().duration(600).ease(d3.easeCubicInOut)
+      .attr("x1", d => d.source.fx || d.source.x)
+      .attr("y1", d => d.source.fy || d.source.y)
+      .attr("x2", d => d.target.fx || d.target.x)
+      .attr("y2", d => d.target.fy || d.target.y);
+
+    linkG.selectAll("text.link-label")
+      .transition().duration(600).ease(d3.easeCubicInOut)
+      .attr("x", d => ((d.source.fx || d.source.x) + (d.target.fx || d.target.x)) / 2)
+      .attr("y", d => ((d.source.fy || d.source.y) + (d.target.fy || d.target.y)) / 2 - 4);
+  }
+}
+
+/**
+ * computeHierarchicalPositions — assigns fx/fy using BFS level assignment (top-down).
+ * Handles cycles by assigning remaining nodes to level 0.
+ */
+function computeHierarchicalPositions(nodes, links, W, H) {
+  const outEdges = {};
+  const inDegree  = {};
+  nodes.forEach(n => { outEdges[n.id] = []; inDegree[n.id] = 0; });
+
+  links.forEach(l => {
+    const srcId = typeof l.source === "object" ? l.source.id : l.source;
+    const tgtId = typeof l.target === "object" ? l.target.id : l.target;
+    if (outEdges[srcId] !== undefined) outEdges[srcId].push(tgtId);
+    if (inDegree[tgtId]  !== undefined) inDegree[tgtId]++;
+  });
+
+  // BFS from root nodes (in-degree 0)
+  let roots = nodes.filter(n => inDegree[n.id] === 0).map(n => n.id);
+  if (roots.length === 0) roots = [nodes[0].id]; // fallback for fully cyclic graphs
+
+  const level = {};
+  const queue = roots.map(id => ({ id, lvl: 0 }));
+  while (queue.length) {
+    const { id, lvl } = queue.shift();
+    if (level[id] !== undefined) continue;
+    level[id] = lvl;
+    (outEdges[id] || []).forEach(tid => {
+      if (level[tid] === undefined) queue.push({ id: tid, lvl: lvl + 1 });
+    });
+  }
+  // Remaining unvisited nodes (cycles) → level 0
+  nodes.forEach(n => { if (level[n.id] === undefined) level[n.id] = 0; });
+
+  // Group by level
+  const byLevel = {};
+  nodes.forEach(n => {
+    const lvl = level[n.id];
+    if (!byLevel[lvl]) byLevel[lvl] = [];
+    byLevel[lvl].push(n);
+  });
+
+  const maxLevel = Math.max(...Object.keys(byLevel).map(Number));
+  const yPad   = 70;
+  const yRange  = H - yPad * 2;
+  const yStep   = maxLevel > 0 ? yRange / maxLevel : yRange;
+
+  Object.entries(byLevel).forEach(([lvl, levelNodes]) => {
+    const count  = levelNodes.length;
+    const xStep  = W / (count + 1);
+    levelNodes.forEach((n, i) => {
+      n.fx = xStep * (i + 1);
+      n.fy = yPad + Number(lvl) * Math.min(yStep, 160);
+    });
+  });
+}
+
+/**
+ * computeCircularPositions — arranges all nodes evenly on a circle.
+ * Groups by device_type so same-type nodes are clustered together.
+ */
+function computeCircularPositions(nodes, W, H) {
+  const cx = W / 2;
+  const cy = H / 2;
+  const r  = Math.min(W, H) * 0.36;
+
+  // Sort nodes: group by device_type for visual clustering
+  const typeOrder = { firewall: 0, router: 1, switch: 2, unknown: 3 };
+  const sorted = [...nodes].sort((a, b) =>
+    (typeOrder[a.device_type] ?? 4) - (typeOrder[b.device_type] ?? 4)
+  );
+
+  sorted.forEach((n, i) => {
+    const angle = (2 * Math.PI * i) / sorted.length - Math.PI / 2;
+    n.fx = cx + r * Math.cos(angle);
+    n.fy = cy + r * Math.sin(angle);
+  });
+}
+
+// ── Layout button wiring ───────────────────────────────────────
+
+const LAYOUT_MODES = ["force", "hierarchical", "circular", "free"];
+
+function initLayoutButtons() {
+  LAYOUT_MODES.forEach(mode => {
+    const btn = document.getElementById(`btnLayout_${mode}`);
+    if (btn) btn.onclick = () => setLayout(mode);
+  });
+  updateLayoutButtons();
+}
+
+function updateLayoutButtons() {
+  LAYOUT_MODES.forEach(mode => {
+    const btn = document.getElementById(`btnLayout_${mode}`);
+    if (!btn) return;
+    if (mode === layoutMode) {
+      btn.classList.add("bg-brand-500", "text-white");
+      btn.classList.remove("text-slate-600", "dark:text-slate-300",
+                           "hover:bg-slate-100", "dark:hover:bg-slate-700");
+    } else {
+      btn.classList.remove("bg-brand-500", "text-white");
+      btn.classList.add("text-slate-600", "dark:text-slate-300",
+                        "hover:bg-slate-100", "dark:hover:bg-slate-700");
+    }
+  });
+}
 
 function exportSVG() {
   const svgEl = document.getElementById("topology");

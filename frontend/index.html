@@ -326,6 +326,60 @@
         </svg>
       </button>
       <div class="w-6 h-px bg-slate-200 dark:bg-slate-700 mx-auto my-1"></div>
+
+      <!-- Layout Mode Buttons -->
+      <div class="text-[8px] text-slate-400 dark:text-slate-500 text-center leading-none mb-0.5 mt-0.5 font-medium tracking-wide uppercase">Layout</div>
+
+      <!-- Force layout -->
+      <button id="btnLayout_force"
+        class="w-8 h-8 flex items-center justify-center rounded bg-brand-500 text-white transition-all"
+        title="Force Layout — physics simulation">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2" fill="none"/>
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 2v3M12 19v3M2 12h3M19 12h3M5.636 5.636l2.121 2.121M16.243 16.243l2.121 2.121M5.636 18.364l2.121-2.121M16.243 7.757l2.121-2.121"/>
+        </svg>
+      </button>
+
+      <!-- Hierarchical layout -->
+      <button id="btnLayout_hierarchical"
+        class="w-8 h-8 flex items-center justify-center rounded hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-all"
+        title="Hierarchical Layout — top-down tree">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <rect x="9" y="2" width="6" height="4" rx="1" stroke-width="1.5"/>
+          <rect x="2" y="10" width="6" height="4" rx="1" stroke-width="1.5"/>
+          <rect x="16" y="10" width="6" height="4" rx="1" stroke-width="1.5"/>
+          <rect x="5" y="18" width="5" height="4" rx="1" stroke-width="1.5"/>
+          <rect x="14" y="18" width="5" height="4" rx="1" stroke-width="1.5"/>
+          <path d="M12 6v4M5 14v4M19 14v4M5 12h14" stroke-linecap="round" stroke-width="1.5"/>
+        </svg>
+      </button>
+
+      <!-- Circular layout -->
+      <button id="btnLayout_circular"
+        class="w-8 h-8 flex items-center justify-center rounded hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-all"
+        title="Circular Layout — ring arrangement">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <circle cx="12" cy="12" r="9" stroke-width="1.5" stroke-dasharray="3 2"/>
+          <circle cx="12" cy="3"  r="2" fill="currentColor"/>
+          <circle cx="20.2" cy="7.5"  r="2" fill="currentColor"/>
+          <circle cx="20.2" cy="16.5" r="2" fill="currentColor"/>
+          <circle cx="12"   cy="21"   r="2" fill="currentColor"/>
+          <circle cx="3.8"  cy="16.5" r="2" fill="currentColor"/>
+          <circle cx="3.8"  cy="7.5"  r="2" fill="currentColor"/>
+        </svg>
+      </button>
+
+      <!-- Free layout -->
+      <button id="btnLayout_free"
+        class="w-8 h-8 flex items-center justify-center rounded hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-all"
+        title="Free Layout — drag nodes independently, no physics">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
+            d="M7 11.5V14l-3 3 3 3h3l3-3-1.5-1.5M15 3l3 3-1.5 1.5M9.5 9.5l5-5M14 13l5 5-3 3-5-5M3 9l3-3 3 3"/>
+        </svg>
+      </button>
+
+      <div class="w-6 h-px bg-slate-200 dark:bg-slate-700 mx-auto my-1"></div>
       <button id="btnExport"
         class="w-8 h-8 flex items-center justify-center rounded hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 text-xs font-bold transition-colors"
         title="Export SVG">↓</button>
