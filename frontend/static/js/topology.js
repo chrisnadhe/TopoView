@@ -37,6 +37,9 @@ let linkLabelsSel = null;
 let portLabelsSrcSel = null;
 let portLabelsDstSel = null;
 
+// Global type-level stencil icons (apply to all nodes of that type unless overridden per-node)
+const typeIcons = { router: null, firewall: null, switch: null, unknown: null };
+
 // ── DOM refs ───────────────────────────────────────────────────
 const fileInput     = document.getElementById("fileInput");
 const uploadZone    = document.getElementById("uploadZone");
@@ -907,78 +910,63 @@ function deviceIcon(type) {
 }
 
 /**
- * updateNodeAppearance — redraws the shape, clip-path, image icon, and letter icon
- * for a single node group (D3 selection). Safe to call repeatedly on the same group.
+ * updateNodeAppearance — redraws the shape and icon for a node group.
+ * Stencil mode: shape = thin border ring only; icon = uploaded image at full size (no clipping).
+ * Priority: d.customIcon (per-node) > typeIcons[device_type] (type-wide) > letter icon.
  */
 function updateNodeAppearance(g, d) {
   const color = COLOR[d.device_type] || COLOR.unknown;
   const r = RADIUS[d.device_type] || 18;
-  const nodeId = d.id.replace(/[^a-zA-Z0-9_-]/g, "_"); // safe DOM id
 
-  // Remove previous shape, clipPath, image, and icon text so we can redraw cleanly
+  // Remove previous elements cleanly
   g.select(".node-circle").remove();
   g.select(".device-icon").remove();
+  g.select(".node-stencil-img").remove();
   g.select(".node-custom-img").remove();
   g.select(".node-clip-path").remove();
-  // Also remove any <defs> we added
   g.select("defs.node-defs").remove();
 
-  // ── Draw the shape ──────────────────────────────────────────
+  // Effective icon: per-node override > type-level stencil > none
+  const effectiveIcon = d.customIcon || typeIcons[d.device_type] || null;
+
+  // ── Shape (always drawn as a ring; fill is transparent when stencil active) ──
   if (d.device_type === "firewall") {
     g.append("polygon")
       .attr("points", hexPoints(r))
-      .attr("fill", color + "22")
+      .attr("fill",   effectiveIcon ? "none" : color + "22")
       .attr("stroke", color)
-      .attr("stroke-width", 2)
+      .attr("stroke-width", effectiveIcon ? 1.5 : 2)
       .attr("class", "node-circle");
   } else if (d.device_type === "switch") {
     g.append("rect")
       .attr("x", -r).attr("y", -r * 0.65)
       .attr("width", r * 2).attr("height", r * 1.3)
       .attr("rx", 5)
-      .attr("fill", color + "22")
+      .attr("fill",   effectiveIcon ? "none" : color + "22")
       .attr("stroke", color)
-      .attr("stroke-width", 2)
+      .attr("stroke-width", effectiveIcon ? 1.5 : 2)
       .attr("class", "node-circle");
   } else {
-    // router & unknown — circle
     g.append("circle")
       .attr("r", r)
-      .attr("fill", color + "22")
+      .attr("fill",   effectiveIcon ? "none" : color + "22")
       .attr("stroke", color)
-      .attr("stroke-width", 2)
+      .attr("stroke-width", effectiveIcon ? 1.5 : 2)
       .attr("class", "node-circle");
   }
 
-  // ── Custom icon (uploaded image) ────────────────────────────
-  if (d.customIcon) {
-    // Add <defs> with a <clipPath> matching the node shape
-    const clipId = `clip-node-${nodeId}`;
-    const defs = g.append("defs").attr("class", "node-defs");
-    const clipPath = defs.append("clipPath").attr("id", clipId);
-
-    // Clip shape must match the node shape (circle for router/unknown)
-    if (d.device_type === "switch") {
-      clipPath.append("rect")
-        .attr("x", -r + 2).attr("y", -(r * 0.65) + 2)
-        .attr("width", r * 2 - 4).attr("height", r * 1.3 - 4)
-        .attr("rx", 4);
-    } else if (d.device_type === "firewall") {
-      // Use a circle inscribed in the hexagon for clip
-      clipPath.append("circle").attr("r", r * 0.8);
-    } else {
-      clipPath.append("circle").attr("r", r - 2);
-    }
-
-    // Overlay the image clipped to the shape
+  // ── Stencil image or letter icon ────────────────────────────
+  if (effectiveIcon) {
+    // Render as stencil: image IS the icon, no clipping, aspect ratio preserved
+    const imgSize = r * 1.7; // slightly smaller than shape boundary
     g.append("image")
-      .attr("href", d.customIcon)
-      .attr("x", -r + 2).attr("y", -(r) + 2)
-      .attr("width",  (r - 2) * 2)
-      .attr("height", (r - 2) * 2)
-      .attr("clip-path", `url(#${clipId})`)
-      .attr("preserveAspectRatio", "xMidYMid slice")
-      .attr("class", "node-custom-img")
+      .attr("href", effectiveIcon)
+      .attr("x", -imgSize / 2)
+      .attr("y", -imgSize / 2)
+      .attr("width",  imgSize)
+      .attr("height", imgSize)
+      .attr("preserveAspectRatio", "xMidYMid meet")
+      .attr("class", d.customIcon ? "node-custom-img" : "node-stencil-img")
       .attr("pointer-events", "none");
   } else {
     // Default letter icon
@@ -993,6 +981,69 @@ function updateNodeAppearance(g, d) {
   }
 }
 
+/**
+ * refreshTypeSymbol — re-renders all nodes of a given device_type
+ * after the type-level stencil icon has changed.
+ */
+function refreshTypeSymbol(type) {
+  if (!nodeGroupsSel) return;
+  nodeGroupsSel.filter(d => d.device_type === type && !d.customIcon).each(function(d) {
+    updateNodeAppearance(d3.select(this), d);
+  });
+}
+
+/**
+ * initSymbolSidebar — wires up the Device Symbols section in the sidebar.
+ * Called once after the DOM is ready.
+ */
+function initSymbolSidebar() {
+  DEVICE_TYPES.forEach(type => {
+    const fileInput   = document.getElementById(`symbolFile_${type}`);
+    const clearBtn    = document.getElementById(`symbolClear_${type}`);
+    const previewImg  = document.getElementById(`symbolPreview_${type}`);
+
+    if (!fileInput) return;
+
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        typeIcons[type] = ev.target.result;
+        fileInput.value = "";
+        updateSymbolRow(type);
+        refreshTypeSymbol(type);
+      };
+      reader.readAsDataURL(file);
+    });
+
+    clearBtn.addEventListener("click", () => {
+      typeIcons[type] = null;
+      updateSymbolRow(type);
+      refreshTypeSymbol(type);
+    });
+  });
+}
+
+/** Update the preview image and clear button visibility for a symbol row. */
+function updateSymbolRow(type) {
+  const previewImg = document.getElementById(`symbolPreview_${type}`);
+  const clearBtn   = document.getElementById(`symbolClear_${type}`);
+  const labelEl    = document.getElementById(`symbolLabel_${type}`);
+  if (typeIcons[type]) {
+    previewImg.src = typeIcons[type];
+    previewImg.classList.remove("hidden");
+    clearBtn.classList.remove("hidden");
+    if (labelEl) labelEl.textContent = "Change";
+  } else {
+    previewImg.src = "";
+    previewImg.classList.add("hidden");
+    clearBtn.classList.add("hidden");
+    if (labelEl) labelEl.textContent = "Upload";
+  }
+}
+
+
 function exportSVG() {
   const svgEl = document.getElementById("topology");
   const data = new XMLSerializer().serializeToString(svgEl);
@@ -1002,3 +1053,6 @@ function exportSVG() {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+// Wire up symbol sidebar on load
+initSymbolSidebar();
