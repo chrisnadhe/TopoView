@@ -16,6 +16,8 @@ const RADIUS = {
   unknown: 18,
 };
 
+const DEVICE_TYPES = ["router", "firewall", "switch", "unknown"];
+
 // ── State ──────────────────────────────────────────────────────
 let topologyData = null;
 let simulation = null;
@@ -167,7 +169,7 @@ function renderTopology(data) {
   }
 
   // Prepare D3 nodes/links (need object references for simulation)
-  const nodes = data.nodes.map(d => ({ ...d, label: d.label || null, note: d.note || null }));
+  const nodes = data.nodes.map(d => ({ ...d, label: d.label || null, note: d.note || null, customIcon: d.customIcon || null }));
   const nodeById = Object.fromEntries(nodes.map(n => [n.id, n]));
   allNodesData = nodes;
 
@@ -351,47 +353,8 @@ function renderTopology(data) {
     }
   });
 
-  // Device shapes
-  nodeGroups.each(function(d) {
-    const g = d3.select(this);
-    const color = COLOR[d.device_type] || COLOR.unknown;
-    const r = RADIUS[d.device_type] || 18;
-
-    if (d.device_type === "firewall") {
-      g.append("polygon")
-        .attr("points", hexPoints(r))
-        .attr("fill", color + "22")
-        .attr("stroke", color)
-        .attr("stroke-width", 2)
-        .attr("class", "node-circle");
-    } else if (d.device_type === "switch") {
-      g.append("rect")
-        .attr("x", -r).attr("y", -r * 0.65)
-        .attr("width", r * 2).attr("height", r * 1.3)
-        .attr("rx", 5)
-        .attr("fill", color + "22")
-        .attr("stroke", color)
-        .attr("stroke-width", 2)
-        .attr("class", "node-circle");
-    } else {
-      g.append("circle")
-        .attr("r", r)
-        .attr("fill", color + "22")
-        .attr("stroke", color)
-        .attr("stroke-width", 2)
-        .attr("class", "node-circle");
-    }
-
-    // Device type icon
-    g.append("text")
-      .attr("text-anchor", "middle")
-      .attr("dy", "0.35em")
-      .attr("font-size", "11px")
-      .attr("fill", color)
-      .attr("pointer-events", "none")
-      .attr("class", "device-icon")
-      .text(deviceIcon(d.device_type));
-  });
+  // Device shapes — drawn via helper so they can be redrawn on edit
+  nodeGroups.each(function(d) { updateNodeAppearance(d3.select(this), d); });
 
   // Node labels (hostname / custom label)
   nodeGroups.append("text")
@@ -622,7 +585,7 @@ function showManualLinkDialog(src, tgt, onComplete) {
   setTimeout(() => document.getElementById("dlgSrcPort").focus(), 50);
 }
 
-// ── Node Label Editor ──────────────────────────────────────────
+// ── Node Editor (Label, Note, Type, Vendor, Icon) ─────────────
 function openLabelEditor(e, d, svg, zoom) {
   e.stopPropagation();
   hideTooltip();
@@ -641,35 +604,145 @@ function openLabelEditor(e, d, svg, zoom) {
   const screenX = transform.applyX(d.x) + svgRect.left - mainRect.left;
   const screenY = transform.applyY(d.y) + svgRect.top - mainRect.top;
 
+  // Position editor — anchor to the right of the node, clamped to viewport
+  const editorW = 288;
+  const editorLeft = Math.min(Math.max(screenX + 34, 8), mainRect.width - editorW - 8);
+  const editorTop  = Math.max(Math.min(screenY - 80, mainRect.height - 520), 8);
+
+  // Type dropdown options
+  const typeOptions = DEVICE_TYPES.map(t =>
+    `<option value="${t}" ${t === d.device_type ? "selected" : ""}>${t.charAt(0).toUpperCase() + t.slice(1)}</option>`
+  ).join("");
+
+  // Current icon preview (if any)
+  const iconPreviewHtml = d.customIcon
+    ? `<div id="editorIconPreview" class="mt-2 flex items-center gap-2">
+        <img src="${d.customIcon}" class="w-10 h-10 rounded-full object-cover border-2 border-brand-400" alt="icon preview">
+        <button id="editorIconClear" class="text-xs text-rose-500 hover:text-rose-600 underline">Remove icon</button>
+       </div>`
+    : `<div id="editorIconPreview" class="hidden"></div>`;
+
   const editor = document.createElement("div");
   editor.id = "nodeLabelEditor";
-  editor.className = "absolute z-50 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl p-4 w-64";
-  editor.style.left = Math.min(screenX + 30, mainRect.width - 280) + "px";
-  editor.style.top = Math.max(screenY - 60, 10) + "px";
+  editor.className = "absolute z-50 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl p-4 overflow-y-auto";
+  editor.style.left   = editorLeft + "px";
+  editor.style.top    = editorTop + "px";
+  editor.style.width  = editorW + "px";
+  editor.style.maxHeight = (mainRect.height - editorTop - 16) + "px";
+
   editor.innerHTML = `
-    <div class="flex items-center gap-2 mb-3">
-      <svg class="w-4 h-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
-      <span class="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Node Editor</span>
+    <div class="flex items-center justify-between mb-3">
+      <div class="flex items-center gap-2">
+        <svg class="w-4 h-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+        <span class="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Device Editor</span>
+      </div>
+      <span class="text-[10px] font-mono text-slate-400 dark:text-slate-500">${d.hostname}</span>
     </div>
+
     <div class="space-y-3">
+
+      <!-- Display Label -->
       <div>
         <label class="text-xs font-medium text-slate-600 dark:text-slate-300 block mb-1">Display Label</label>
-        <input id="editorLabel" type="text" value="${d.label || d.hostname}" class="w-full text-sm bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-1.5 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500">
+        <input id="editorLabel" type="text" value="${d.label || d.hostname}"
+          class="w-full text-sm bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-1.5 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500">
       </div>
+
+      <!-- Note / Annotation -->
       <div>
         <label class="text-xs font-medium text-slate-600 dark:text-slate-300 block mb-1">Note / Annotation</label>
-        <textarea id="editorNote" rows="2" placeholder="Add a note…" class="w-full text-sm bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-1.5 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none">${d.note || ""}</textarea>
+        <textarea id="editorNote" rows="2" placeholder="Add a note…"
+          class="w-full text-sm bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-1.5 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none">${d.note || ""}</textarea>
       </div>
+
+      <!-- Device Type -->
+      <div>
+        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 block mb-1">Device Type</label>
+        <select id="editorType"
+          class="w-full text-sm bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-1.5 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500">
+          ${typeOptions}
+        </select>
+      </div>
+
+      <!-- Vendor -->
+      <div>
+        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 block mb-1">Vendor</label>
+        <input id="editorVendor" type="text" value="${d.vendor || ""}"
+          class="w-full text-sm bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-1.5 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500">
+      </div>
+
+      <!-- Custom Icon -->
+      <div>
+        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 block mb-1">Device Icon</label>
+        <label for="editorIconFile"
+          class="flex items-center gap-2 cursor-pointer w-full text-sm bg-slate-50 dark:bg-slate-700 border border-dashed border-slate-300 dark:border-slate-500 rounded-lg px-3 py-1.5 text-slate-500 dark:text-slate-400 hover:border-brand-400 hover:text-brand-500 transition-colors">
+          <svg class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+          <span id="editorIconLabel">Upload image…</span>
+        </label>
+        <input id="editorIconFile" type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp,image/gif" class="hidden">
+        ${iconPreviewHtml}
+      </div>
+
     </div>
-    <div class="mt-3 flex gap-2">
-      <button id="editorSave" class="flex-1 py-1.5 bg-brand-500 hover:bg-brand-600 text-white font-medium rounded-lg text-xs transition-colors">Save</button>
-      <button id="editorClear" class="py-1.5 px-3 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-500 dark:text-slate-400 rounded-lg text-xs transition-colors" title="Reset to hostname">↺</button>
+
+    <!-- Actions -->
+    <div class="mt-4 flex gap-2">
+      <button id="editorSave"   class="flex-1 py-1.5 bg-brand-500 hover:bg-brand-600 text-white font-medium rounded-lg text-xs transition-colors">Save</button>
+      <button id="editorClear"  class="py-1.5 px-3 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-500 dark:text-slate-400 rounded-lg text-xs transition-colors" title="Reset label to hostname">↺</button>
       <button id="editorCancel" class="flex-1 py-1.5 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 font-medium rounded-lg text-xs transition-colors">Cancel</button>
     </div>
   `;
 
   mainEl.appendChild(editor);
 
+  // ── Icon file handling ─────────────────────────────────────
+  let pendingIconDataUrl = null;  // holds new icon before save
+  let clearIcon = false;          // set true when user clicks "Remove icon"
+
+  const iconFileInput  = document.getElementById("editorIconFile");
+  const iconLabelEl   = document.getElementById("editorIconLabel");
+  const iconPreviewEl = document.getElementById("editorIconPreview");
+
+  function showIconPreview(dataUrl) {
+    iconPreviewEl.className = "mt-2 flex items-center gap-2";
+    iconPreviewEl.innerHTML = `
+      <img src="${dataUrl}" class="w-10 h-10 rounded-full object-cover border-2 border-brand-400" alt="icon preview">
+      <button id="editorIconClear" class="text-xs text-rose-500 hover:text-rose-600 underline">Remove icon</button>`;
+    document.getElementById("editorIconClear").onclick = () => {
+      pendingIconDataUrl = null;
+      clearIcon = true;
+      iconLabelEl.textContent = "Upload image…";
+      iconPreviewEl.className = "hidden";
+      iconPreviewEl.innerHTML = "";
+    };
+  }
+
+  // Existing icon clear button
+  const existingClearBtn = document.getElementById("editorIconClear");
+  if (existingClearBtn) {
+    existingClearBtn.onclick = () => {
+      pendingIconDataUrl = null;
+      clearIcon = true;
+      iconLabelEl.textContent = "Upload image…";
+      iconPreviewEl.className = "hidden";
+      iconPreviewEl.innerHTML = "";
+    };
+  }
+
+  iconFileInput.addEventListener("change", () => {
+    const file = iconFileInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      pendingIconDataUrl = ev.target.result;
+      clearIcon = false;
+      iconLabelEl.textContent = file.name.length > 22 ? file.name.slice(0, 22) + "…" : file.name;
+      showIconPreview(pendingIconDataUrl);
+    };
+    reader.readAsDataURL(file);
+  });
+
+  // ── Editor buttons ─────────────────────────────────────────
   const close = () => editor.remove();
 
   document.getElementById("editorCancel").onclick = close;
@@ -677,20 +750,48 @@ function openLabelEditor(e, d, svg, zoom) {
     document.getElementById("editorLabel").value = d.hostname;
     document.getElementById("editorNote").value = "";
   };
-  document.getElementById("editorSave").onclick = () => {
-    const newLabel = document.getElementById("editorLabel").value.trim();
-    const newNote = document.getElementById("editorNote").value.trim();
-    d.label = newLabel && newLabel !== d.hostname ? newLabel : null;
-    d.note = newNote || null;
 
-    // Update the SVG text elements for this node
+  document.getElementById("editorSave").onclick = () => {
+    const newLabel  = document.getElementById("editorLabel").value.trim();
+    const newNote   = document.getElementById("editorNote").value.trim();
+    const newType   = document.getElementById("editorType").value;
+    const newVendor = document.getElementById("editorVendor").value.trim();
+
+    const typeChanged   = newType !== d.device_type;
+    const iconChanged   = pendingIconDataUrl !== null || clearIcon;
+
+    // Apply changes to node data
+    d.label       = newLabel && newLabel !== d.hostname ? newLabel : null;
+    d.note        = newNote || null;
+    d.device_type = newType;
+    d.vendor      = newVendor || d.vendor;
+    if (pendingIconDataUrl) d.customIcon = pendingIconDataUrl;
+    if (clearIcon)          d.customIcon = null;
+
+    // Re-render the node shape/icon in SVG
     d3.selectAll(".node-group").filter(n => n.id === d.id).each(function() {
       const g = d3.select(this);
-      g.select(".node-label").text(d.label || d.hostname);
-      g.select(".node-note").text(d.note ? `📝 ${d.note.slice(0, 20)}${d.note.length > 20 ? "…" : ""}` : "");
+
+      // Redraw shape + icon (always safe to redo)
+      updateNodeAppearance(g, d);
+
+      // Update text labels
+      const r = RADIUS[d.device_type] || 18;
+      g.select(".node-label")
+        .attr("dy", r + 14)
+        .text(d.label || d.hostname);
+      g.select(".node-note")
+        .attr("dy", r + 25)
+        .text(d.note ? `📝 ${d.note.slice(0, 20)}${d.note.length > 20 ? "…" : ""}` : "");
     });
 
-    // If this node is selected, refresh the device panel
+    // Update collision radius in simulation if type changed
+    if (typeChanged && simulation) {
+      simulation.force("collision", d3.forceCollide().radius(n => RADIUS[n.device_type] + 22));
+      simulation.alpha(0.1).restart();
+    }
+
+    // Refresh device detail panel if this node is selected
     if (selectedNode && selectedNode.id === d.id) {
       selectedNode = d;
       document.getElementById("deviceDetail").innerHTML = renderDeviceDetail(d);
@@ -701,7 +802,7 @@ function openLabelEditor(e, d, svg, zoom) {
 
   // Close on click outside editor
   const outsideClick = (ev) => {
-    if (!editor.contains(ev.target)) {
+    if (!editor.contains(ev.target) && !ev.target.closest("#editorIconFile")) {
       close();
       document.removeEventListener("mousedown", outsideClick);
     }
@@ -803,6 +904,93 @@ function hexPoints(r) {
 
 function deviceIcon(type) {
   return { router: "R", firewall: "FW", switch: "SW", unknown: "?" }[type] || "?";
+}
+
+/**
+ * updateNodeAppearance — redraws the shape, clip-path, image icon, and letter icon
+ * for a single node group (D3 selection). Safe to call repeatedly on the same group.
+ */
+function updateNodeAppearance(g, d) {
+  const color = COLOR[d.device_type] || COLOR.unknown;
+  const r = RADIUS[d.device_type] || 18;
+  const nodeId = d.id.replace(/[^a-zA-Z0-9_-]/g, "_"); // safe DOM id
+
+  // Remove previous shape, clipPath, image, and icon text so we can redraw cleanly
+  g.select(".node-circle").remove();
+  g.select(".device-icon").remove();
+  g.select(".node-custom-img").remove();
+  g.select(".node-clip-path").remove();
+  // Also remove any <defs> we added
+  g.select("defs.node-defs").remove();
+
+  // ── Draw the shape ──────────────────────────────────────────
+  if (d.device_type === "firewall") {
+    g.append("polygon")
+      .attr("points", hexPoints(r))
+      .attr("fill", color + "22")
+      .attr("stroke", color)
+      .attr("stroke-width", 2)
+      .attr("class", "node-circle");
+  } else if (d.device_type === "switch") {
+    g.append("rect")
+      .attr("x", -r).attr("y", -r * 0.65)
+      .attr("width", r * 2).attr("height", r * 1.3)
+      .attr("rx", 5)
+      .attr("fill", color + "22")
+      .attr("stroke", color)
+      .attr("stroke-width", 2)
+      .attr("class", "node-circle");
+  } else {
+    // router & unknown — circle
+    g.append("circle")
+      .attr("r", r)
+      .attr("fill", color + "22")
+      .attr("stroke", color)
+      .attr("stroke-width", 2)
+      .attr("class", "node-circle");
+  }
+
+  // ── Custom icon (uploaded image) ────────────────────────────
+  if (d.customIcon) {
+    // Add <defs> with a <clipPath> matching the node shape
+    const clipId = `clip-node-${nodeId}`;
+    const defs = g.append("defs").attr("class", "node-defs");
+    const clipPath = defs.append("clipPath").attr("id", clipId);
+
+    // Clip shape must match the node shape (circle for router/unknown)
+    if (d.device_type === "switch") {
+      clipPath.append("rect")
+        .attr("x", -r + 2).attr("y", -(r * 0.65) + 2)
+        .attr("width", r * 2 - 4).attr("height", r * 1.3 - 4)
+        .attr("rx", 4);
+    } else if (d.device_type === "firewall") {
+      // Use a circle inscribed in the hexagon for clip
+      clipPath.append("circle").attr("r", r * 0.8);
+    } else {
+      clipPath.append("circle").attr("r", r - 2);
+    }
+
+    // Overlay the image clipped to the shape
+    g.append("image")
+      .attr("href", d.customIcon)
+      .attr("x", -r + 2).attr("y", -(r) + 2)
+      .attr("width",  (r - 2) * 2)
+      .attr("height", (r - 2) * 2)
+      .attr("clip-path", `url(#${clipId})`)
+      .attr("preserveAspectRatio", "xMidYMid slice")
+      .attr("class", "node-custom-img")
+      .attr("pointer-events", "none");
+  } else {
+    // Default letter icon
+    g.append("text")
+      .attr("text-anchor", "middle")
+      .attr("dy", "0.35em")
+      .attr("font-size", "11px")
+      .attr("fill", color)
+      .attr("pointer-events", "none")
+      .attr("class", "device-icon")
+      .text(deviceIcon(d.device_type));
+  }
 }
 
 function exportSVG() {
