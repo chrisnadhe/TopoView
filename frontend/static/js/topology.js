@@ -20,6 +20,20 @@ const RADIUS = {
 let topologyData = null;
 let simulation = null;
 let selectedNode = null;
+let linkEditMode = false;
+let linkDragSource = null;
+let manualLinks = [];
+let parsedLinks = [];   // module-level so deleteLink can mutate it
+let linkG = null;       // module-level D3 selection for link group
+let svgSelection = null;
+let zoomGroupSelection = null;
+let allNodesData = [];
+let allLinksData = [];
+let nodeGroupsSel = null;
+let linkLinesSel = null;
+let linkLabelsSel = null;
+let portLabelsSrcSel = null;
+let portLabelsDstSel = null;
 
 // ── DOM refs ───────────────────────────────────────────────────
 const fileInput     = document.getElementById("fileInput");
@@ -89,6 +103,7 @@ async function fetchAndRender(url, options) {
       return;
     }
     topologyData = await res.json();
+    manualLinks = []; // reset manual links on new parse
     renderTopology(topologyData);
     updateStats(topologyData);
   } catch (e) {
@@ -118,13 +133,19 @@ function renderTopology(data) {
   svgEl.classList.remove("hidden");
   svgEl.innerHTML = "";
 
+  // Remove any existing label editor
+  const existingEditor = document.getElementById("nodeLabelEditor");
+  if (existingEditor) existingEditor.remove();
+
   const W = svgEl.clientWidth || window.innerWidth - 260;
   const H = svgEl.clientHeight || window.innerHeight;
 
-  const svg = d3.select("#topology");
+  svgSelection = d3.select("#topology");
+  const svg = svgSelection;
 
   // Zoom behaviour
-  const zoomG = svg.append("g").attr("class", "zoom-group");
+  zoomGroupSelection = svg.append("g").attr("class", "zoom-group");
+  const zoomG = zoomGroupSelection;
   const zoom = d3.zoom()
     .scaleExtent([0.2, 4])
     .on("zoom", e => zoomG.attr("transform", e.transform));
@@ -136,54 +157,201 @@ function renderTopology(data) {
   document.getElementById("btnFit").onclick     = () => svg.transition().call(zoom.transform, d3.zoomIdentity);
   document.getElementById("btnExport").onclick  = exportSVG;
 
+  // ── Link Edit Mode toggle ──────────────────────────────────
+  const btnLinkEdit = document.getElementById("btnLinkEdit");
+  if (btnLinkEdit) {
+    btnLinkEdit.onclick = () => {
+      linkEditMode = !linkEditMode;
+      updateLinkEditMode(btnLinkEdit, svg);
+    };
+  }
+
   // Prepare D3 nodes/links (need object references for simulation)
-  const nodes = data.nodes.map(d => ({ ...d }));
+  const nodes = data.nodes.map(d => ({ ...d, label: d.label || null, note: d.note || null }));
   const nodeById = Object.fromEntries(nodes.map(n => [n.id, n]));
-  const links = data.links
+  allNodesData = nodes;
+
+  parsedLinks = data.links
     .map(l => ({ ...l, source: nodeById[l.source], target: nodeById[l.target] }))
     .filter(l => l.source && l.target);
 
+  allLinksData = parsedLinks;
+
   // Force simulation
   simulation = d3.forceSimulation(nodes)
-    .force("link", d3.forceLink(links).id(d => d.id).distance(120))
-    .force("charge", d3.forceManyBody().strength(-350))
+    .force("link", d3.forceLink(parsedLinks).id(d => d.id).distance(130))
+    .force("charge", d3.forceManyBody().strength(-400))
     .force("center", d3.forceCenter(W / 2, H / 2))
-    .force("collision", d3.forceCollide().radius(d => RADIUS[d.device_type] + 18));
+    .force("collision", d3.forceCollide().radius(d => RADIUS[d.device_type] + 22));
 
-  // Draw links
-  const linkG = zoomG.append("g").attr("class", "links");
-  const linkLines = linkG.selectAll("line")
-    .data(links)
-    .join("line")
-    .attr("class", "link-line")
-    .attr("stroke-dasharray", d => d.link_type === "subnet" ? "4,4" : "none")
-    .attr("stroke-width", d => d.link_type === "cdp" ? 2 : 1.5);
+  // ── Draw links layer ───────────────────────────────────────
+  linkG = zoomG.append("g").attr("class", "links");
 
-  // Link labels (subnet)
-  const linkLabels = linkG.selectAll("text")
-    .data(links)
-    .join("text")
-    .attr("class", "link-label")
-    .text(d => d.link_type === "cdp" ? "CDP/LLDP" : d.subnet || "");
+  // Rubber-band line for link drawing mode
+  const rubberBand = zoomG.append("line")
+    .attr("class", "rubber-band")
+    .attr("stroke", "#f59e0b")
+    .attr("stroke-width", 2)
+    .attr("stroke-dasharray", "6,4")
+    .attr("opacity", 0)
+    .attr("pointer-events", "none");
 
-  // Draw nodes
+  function buildAllLinks() {
+    return [...parsedLinks, ...manualLinks];
+  }
+
+  function redrawLinks() {
+    const allLinks = buildAllLinks();
+
+    // Link lines
+    const lines = linkG.selectAll("line.link-line")
+      .data(allLinks, d => `${d.source.id || d.source}-${d.target.id || d.target}-${d.subnet || "manual"}`);
+
+    const linesEnter = lines.enter().append("line").attr("class", "link-line");
+    linkLinesSel = linesEnter.merge(lines);
+    lines.exit().remove();
+
+    linkLinesSel = linkG.selectAll("line.link-line");
+    linkLinesSel
+      .attr("stroke-dasharray", d => (d.link_type === "subnet") ? "4,4" : (d.link_type === "manual") ? "8,5" : "none")
+      .attr("stroke-width", d => d.link_type === "cdp" ? 2.5 : d.link_type === "manual" ? 2 : 1.5)
+      .attr("stroke", d => d.link_type === "manual" ? "#f59e0b" : null)
+      .attr("class", d => `link-line${d.link_type === "manual" ? " manual-link" : ""}`)
+      .style("cursor", "context-menu")
+      .on("contextmenu", (e, d) => {
+        e.preventDefault();
+        showLinkContextMenu(e, d);
+      });
+
+    // Subnet / CDP labels at midpoint
+    const midLabels = linkG.selectAll("text.link-label")
+      .data(allLinks, d => `mid-${d.source.id || d.source}-${d.target.id || d.target}`);
+    const midEnter = midLabels.enter().append("text").attr("class", "link-label");
+    midLabels.exit().remove();
+    linkLabelsSel = midEnter.merge(midLabels);
+    linkLabelsSel = linkG.selectAll("text.link-label");
+    linkLabelsSel.text(d => {
+      if (d.link_type === "cdp") return "CDP/LLDP";
+      if (d.link_type === "manual") return d.manual_label || "Manual";
+      return d.subnet || "";
+    });
+
+    // Port labels — source side (near source node)
+    const srcLabels = linkG.selectAll("text.port-label-src")
+      .data(allLinks, d => `src-${d.source.id || d.source}-${d.target.id || d.target}`);
+    const srcEnter = srcLabels.enter().append("text").attr("class", "port-label-src link-port-label");
+    srcLabels.exit().remove();
+    portLabelsSrcSel = srcEnter.merge(srcLabels);
+    portLabelsSrcSel = linkG.selectAll("text.port-label-src");
+    portLabelsSrcSel.text(d => d.source_iface || "");
+
+    // Port labels — target side (near target node)
+    const dstLabels = linkG.selectAll("text.port-label-dst")
+      .data(allLinks, d => `dst-${d.source.id || d.source}-${d.target.id || d.target}`);
+    const dstEnter = dstLabels.enter().append("text").attr("class", "port-label-dst link-port-label");
+    dstLabels.exit().remove();
+    portLabelsDstSel = dstEnter.merge(dstLabels);
+    portLabelsDstSel = linkG.selectAll("text.port-label-dst");
+    portLabelsDstSel.text(d => d.target_iface || "");
+  }
+
+  redrawLinks();
+
+  // ── Draw nodes ────────────────────────────────────────────
   const nodeG = zoomG.append("g").attr("class", "nodes");
   const nodeGroups = nodeG.selectAll("g")
     .data(nodes)
     .join("g")
-    .attr("class", "node-group")
-    .call(
-      d3.drag()
-        .on("start", (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-        .on("drag",  (e, d) => { d.fx = e.x; d.fy = e.y; })
-        .on("end",   (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
-    )
-    .on("click", (e, d) => { e.stopPropagation(); selectNode(d); })
-    .on("mouseover", (e, d) => showTooltip(e, d))
+    .attr("class", "node-group");
+
+  nodeGroupsSel = nodeGroups;
+
+  // Drag behaviour (normal mode)
+  const normalDrag = d3.drag()
+    .on("start", (e, d) => {
+      if (linkEditMode) return;
+      if (!e.active) simulation.alphaTarget(0.3).restart();
+      d.fx = d.x; d.fy = d.y;
+    })
+    .on("drag", (e, d) => {
+      if (linkEditMode) return;
+      d.fx = e.x; d.fy = e.y;
+    })
+    .on("end", (e, d) => {
+      if (linkEditMode) return;
+      if (!e.active) simulation.alphaTarget(0);
+      d.fx = null; d.fy = null;
+    });
+
+  nodeGroups.call(normalDrag);
+
+  // Click → select node (only in normal mode)
+  nodeGroups.on("click", (e, d) => {
+    if (linkEditMode) return;
+    e.stopPropagation();
+    selectNode(d);
+  });
+
+  // Double-click → label editor
+  nodeGroups.on("dblclick", (e, d) => {
+    e.stopPropagation();
+    openLabelEditor(e, d, svg, zoom);
+  });
+
+  // Tooltip
+  nodeGroups
+    .on("mouseover", (e, d) => { if (!linkEditMode) showTooltip(e, d); })
     .on("mousemove", e => moveTooltip(e))
     .on("mouseout", hideTooltip);
 
-  // Device shape: router=circle, firewall=hexagon, switch=rounded-rect, unknown=circle
+  // ── Link Edit Mode — draw link on drag over nodes ──────────
+  nodeGroups.on("mousedown.linkEdit", (e, d) => {
+    if (!linkEditMode) return;
+    e.stopPropagation();
+    linkDragSource = d;
+    hideTooltip();
+
+    // Get SVG coordinates
+    const [mx, my] = d3.pointer(e, zoomG.node());
+    rubberBand
+      .attr("x1", d.x).attr("y1", d.y)
+      .attr("x2", mx).attr("y2", my)
+      .attr("opacity", 1);
+  });
+
+  svg.on("mousemove.linkEdit", (e) => {
+    if (!linkEditMode || !linkDragSource) return;
+    const [mx, my] = d3.pointer(e, zoomG.node());
+    rubberBand.attr("x2", mx).attr("y2", my);
+  });
+
+  nodeGroups.on("mouseup.linkEdit", (e, d) => {
+    if (!linkEditMode || !linkDragSource) return;
+    if (d.id === linkDragSource.id) {
+      cancelLinkDraw(rubberBand);
+      return;
+    }
+    // Create manual link
+    const src = linkDragSource;
+    const tgt = d;
+    cancelLinkDraw(rubberBand);
+
+    showManualLinkDialog(src, tgt, () => {
+      redrawLinks();
+      simulation.alpha(0.1).restart();
+    });
+  });
+
+  svg.on("mouseup.linkEdit", (e) => {
+    if (!linkEditMode) return;
+    const target = e.target;
+    // If mouseup landed on the SVG background (not a node), cancel
+    if (!target.closest(".node-group")) {
+      cancelLinkDraw(rubberBand);
+    }
+  });
+
+  // Device shapes
   nodeGroups.each(function(d) {
     const g = d3.select(this);
     const color = COLOR[d.device_type] || COLOR.unknown;
@@ -214,37 +382,334 @@ function renderTopology(data) {
         .attr("class", "node-circle");
     }
 
-    // Device type icon (text)
+    // Device type icon
     g.append("text")
       .attr("text-anchor", "middle")
       .attr("dy", "0.35em")
       .attr("font-size", "11px")
       .attr("fill", color)
       .attr("pointer-events", "none")
+      .attr("class", "device-icon")
       .text(deviceIcon(d.device_type));
   });
 
-  // Node labels
+  // Node labels (hostname / custom label)
   nodeGroups.append("text")
     .attr("class", "node-label")
     .attr("dy", d => (RADIUS[d.device_type] || 18) + 14)
-    .text(d => d.hostname);
+    .text(d => d.label || d.hostname);
+
+  // Note indicator (small italic annotation below label)
+  nodeGroups.append("text")
+    .attr("class", "node-note")
+    .attr("dy", d => (RADIUS[d.device_type] || 18) + 25)
+    .attr("text-anchor", "middle")
+    .attr("font-size", "9px")
+    .attr("fill", "#f59e0b")
+    .attr("font-style", "italic")
+    .attr("pointer-events", "none")
+    .text(d => d.note ? `📝 ${d.note.slice(0, 20)}${d.note.length > 20 ? "…" : ""}` : "");
 
   // Simulation tick
   simulation.on("tick", () => {
-    linkLines
+    const allLinks = buildAllLinks();
+
+    linkG.selectAll("line.link-line")
       .attr("x1", d => d.source.x).attr("y1", d => d.source.y)
       .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
 
-    linkLabels
+    // Midpoint labels
+    linkG.selectAll("text.link-label")
       .attr("x", d => (d.source.x + d.target.x) / 2)
       .attr("y", d => (d.source.y + d.target.y) / 2 - 4);
+
+    // Port labels at 1/4 and 3/4 positions
+    linkG.selectAll("text.port-label-src").each(function(d) {
+      const sx = d.source.x, sy = d.source.y, tx = d.target.x, ty = d.target.y;
+      const angle = Math.atan2(ty - sy, tx - sx);
+      const offset = 12; // perpendicular offset
+      const px = sx + (tx - sx) * 0.2;
+      const py = sy + (ty - sy) * 0.2;
+      d3.select(this)
+        .attr("x", px + Math.sin(angle) * offset)
+        .attr("y", py - Math.cos(angle) * offset);
+    });
+
+    linkG.selectAll("text.port-label-dst").each(function(d) {
+      const sx = d.source.x, sy = d.source.y, tx = d.target.x, ty = d.target.y;
+      const angle = Math.atan2(ty - sy, tx - sx);
+      const offset = 12;
+      const px = sx + (tx - sx) * 0.8;
+      const py = sy + (ty - sy) * 0.8;
+      d3.select(this)
+        .attr("x", px + Math.sin(angle) * offset)
+        .attr("y", py - Math.cos(angle) * offset);
+    });
 
     nodeGroups.attr("transform", d => `translate(${d.x},${d.y})`);
   });
 
   // Deselect on canvas click
-  svg.on("click", () => deselectNode());
+  svg.on("click", () => {
+    if (!linkEditMode) deselectNode();
+    closeLinkContextMenu();
+  });
+
+  function buildAllLinks() {
+    const manualMapped = manualLinks.map(l => ({
+      ...l,
+      source: typeof l.source === "object" ? l.source : nodeById[l.source],
+      target: typeof l.target === "object" ? l.target : nodeById[l.target],
+    }));
+    return [...parsedLinks, ...manualMapped];
+  }
+}
+
+// ── Link Edit Mode helpers ─────────────────────────────────────
+function cancelLinkDraw(rubberBand) {
+  linkDragSource = null;
+  rubberBand.attr("opacity", 0);
+}
+
+function updateLinkEditMode(btn, svg) {
+  const svgEl = document.getElementById("topology");
+  if (linkEditMode) {
+    btn.classList.add("bg-amber-500", "text-white");
+    btn.classList.remove("text-slate-600", "dark:text-slate-300");
+    svgEl.style.cursor = "crosshair";
+  } else {
+    btn.classList.remove("bg-amber-500", "text-white");
+    btn.classList.add("text-slate-600", "dark:text-slate-300");
+    svgEl.style.cursor = "";
+    linkDragSource = null;
+  }
+}
+
+// Context menu for deleting any link
+let contextMenuEl = null;
+
+function showLinkContextMenu(e, d) {
+  closeLinkContextMenu();
+  const menu = document.createElement("div");
+  menu.id = "linkContextMenu";
+  menu.className = "fixed z-50 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-xl text-sm overflow-hidden";
+  menu.style.left = e.clientX + "px";
+  menu.style.top = e.clientY + "px";
+
+  const typeLabel = d.link_type === "manual" ? "Manual Link" : d.link_type === "cdp" ? "CDP / LLDP Link" : "Subnet Link";
+  const subnetRow = (d.subnet && d.link_type !== "manual")
+    ? `<div class="px-4 py-1 text-[10px] font-mono text-slate-400 dark:text-slate-500">${d.subnet}</div>`
+    : "";
+  const srcInfo = (d.source_iface || d.target_iface)
+    ? `<div class="px-4 pb-1 text-[10px] font-mono text-blue-400">${d.source_iface || "—"} ↔ ${d.target_iface || "—"}</div>`
+    : "";
+
+  menu.innerHTML = `
+    <div class="px-4 py-2 text-xs font-semibold text-slate-400 dark:text-slate-500 border-b border-slate-100 dark:border-slate-700">${typeLabel}</div>
+    ${subnetRow}${srcInfo}
+    <button id="ctxDeleteLink" class="w-full text-left px-4 py-2 hover:bg-rose-50 dark:hover:bg-rose-900/20 text-rose-600 dark:text-rose-400 flex items-center gap-2">
+      <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+      Delete Link
+    </button>
+  `;
+  document.body.appendChild(menu);
+  contextMenuEl = menu;
+
+  document.getElementById("ctxDeleteLink").addEventListener("click", () => deleteLink(d));
+}
+
+function deleteLink(d) {
+  closeLinkContextMenu();
+
+  // Remove from the correct data array
+  if (d.link_type === "manual") {
+    manualLinks = manualLinks.filter(l => l !== d);
+  } else {
+    parsedLinks = parsedLinks.filter(l => l !== d);
+  }
+
+  // Update force simulation to drop the link
+  if (simulation) {
+    const remaining = [
+      ...parsedLinks,
+      ...manualLinks.map(l => ({
+        ...l,
+        source: typeof l.source === "object" ? l.source : allNodesData.find(n => n.id === l.source),
+        target: typeof l.target === "object" ? l.target : allNodesData.find(n => n.id === l.target),
+      }))
+    ];
+    simulation.force("link").links(remaining);
+    simulation.alpha(0.05).restart();
+  }
+
+  // Directly remove SVG elements bound to this datum — no full re-render
+  if (linkG) {
+    linkG.selectAll("line.link-line").filter(l => l === d).remove();
+    linkG.selectAll("text.link-label").filter(l => l === d).remove();
+    linkG.selectAll("text.port-label-src").filter(l => l === d).remove();
+    linkG.selectAll("text.port-label-dst").filter(l => l === d).remove();
+  }
+}
+
+function closeLinkContextMenu() {
+  if (contextMenuEl) {
+    contextMenuEl.remove();
+    contextMenuEl = null;
+  }
+}
+
+// ── Manual Link Dialog ─────────────────────────────────────────
+function showManualLinkDialog(src, tgt, onComplete) {
+  const existing = document.getElementById("manualLinkDialog");
+  if (existing) existing.remove();
+
+  const dialog = document.createElement("div");
+  dialog.id = "manualLinkDialog";
+  dialog.className = "fixed inset-0 z-50 flex items-center justify-center";
+  dialog.innerHTML = `
+    <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" id="manualLinkBackdrop"></div>
+    <div class="relative bg-white dark:bg-slate-800 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 p-6 w-80 z-10">
+      <h3 class="font-bold text-slate-900 dark:text-white mb-1">Add Manual Link</h3>
+      <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
+        <span class="font-medium text-brand-400">${src.hostname}</span>
+        <svg class="inline w-3 h-3 mx-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6"/></svg>
+        <span class="font-medium text-brand-400">${tgt.hostname}</span>
+      </p>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs font-medium text-slate-600 dark:text-slate-300 block mb-1">${src.hostname} Port <span class="opacity-50">(optional)</span></label>
+          <input id="dlgSrcPort" type="text" placeholder="e.g. Gi0/1" class="w-full text-sm bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500">
+        </div>
+        <div>
+          <label class="text-xs font-medium text-slate-600 dark:text-slate-300 block mb-1">${tgt.hostname} Port <span class="opacity-50">(optional)</span></label>
+          <input id="dlgTgtPort" type="text" placeholder="e.g. Gi0/2" class="w-full text-sm bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500">
+        </div>
+        <div>
+          <label class="text-xs font-medium text-slate-600 dark:text-slate-300 block mb-1">Label <span class="opacity-50">(optional)</span></label>
+          <input id="dlgLabel" type="text" placeholder="e.g. Trunk, Uplink…" class="w-full text-sm bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500">
+        </div>
+      </div>
+      <div class="mt-5 flex gap-2">
+        <button id="dlgSave" class="flex-1 py-2 bg-amber-500 hover:bg-amber-600 text-white font-medium rounded-lg text-sm transition-colors">Add Link</button>
+        <button id="dlgCancel" class="flex-1 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 font-medium rounded-lg text-sm transition-colors">Cancel</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(dialog);
+
+  const close = () => dialog.remove();
+
+  document.getElementById("manualLinkBackdrop").onclick = close;
+  document.getElementById("dlgCancel").onclick = close;
+  document.getElementById("dlgSave").onclick = () => {
+    const srcPort = document.getElementById("dlgSrcPort").value.trim();
+    const tgtPort = document.getElementById("dlgTgtPort").value.trim();
+    const label = document.getElementById("dlgLabel").value.trim();
+    manualLinks.push({
+      source: src,
+      target: tgt,
+      source_iface: srcPort,
+      target_iface: tgtPort,
+      manual_label: label || "Manual",
+      link_type: "manual",
+      subnet: null,
+    });
+    close();
+    onComplete();
+  };
+
+  // Auto-focus first input
+  setTimeout(() => document.getElementById("dlgSrcPort").focus(), 50);
+}
+
+// ── Node Label Editor ──────────────────────────────────────────
+function openLabelEditor(e, d, svg, zoom) {
+  e.stopPropagation();
+  hideTooltip();
+
+  const existing = document.getElementById("nodeLabelEditor");
+  if (existing) existing.remove();
+
+  // Get the screen position of the node
+  const svgEl = document.getElementById("topology");
+  const svgRect = svgEl.getBoundingClientRect();
+  const mainEl = document.querySelector("main");
+  const mainRect = mainEl.getBoundingClientRect();
+
+  // Get current zoom/pan transform
+  const transform = d3.zoomTransform(svgEl);
+  const screenX = transform.applyX(d.x) + svgRect.left - mainRect.left;
+  const screenY = transform.applyY(d.y) + svgRect.top - mainRect.top;
+
+  const editor = document.createElement("div");
+  editor.id = "nodeLabelEditor";
+  editor.className = "absolute z-50 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl p-4 w-64";
+  editor.style.left = Math.min(screenX + 30, mainRect.width - 280) + "px";
+  editor.style.top = Math.max(screenY - 60, 10) + "px";
+  editor.innerHTML = `
+    <div class="flex items-center gap-2 mb-3">
+      <svg class="w-4 h-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+      <span class="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Node Editor</span>
+    </div>
+    <div class="space-y-3">
+      <div>
+        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 block mb-1">Display Label</label>
+        <input id="editorLabel" type="text" value="${d.label || d.hostname}" class="w-full text-sm bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-1.5 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500">
+      </div>
+      <div>
+        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 block mb-1">Note / Annotation</label>
+        <textarea id="editorNote" rows="2" placeholder="Add a note…" class="w-full text-sm bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-1.5 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none">${d.note || ""}</textarea>
+      </div>
+    </div>
+    <div class="mt-3 flex gap-2">
+      <button id="editorSave" class="flex-1 py-1.5 bg-brand-500 hover:bg-brand-600 text-white font-medium rounded-lg text-xs transition-colors">Save</button>
+      <button id="editorClear" class="py-1.5 px-3 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-500 dark:text-slate-400 rounded-lg text-xs transition-colors" title="Reset to hostname">↺</button>
+      <button id="editorCancel" class="flex-1 py-1.5 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 font-medium rounded-lg text-xs transition-colors">Cancel</button>
+    </div>
+  `;
+
+  mainEl.appendChild(editor);
+
+  const close = () => editor.remove();
+
+  document.getElementById("editorCancel").onclick = close;
+  document.getElementById("editorClear").onclick = () => {
+    document.getElementById("editorLabel").value = d.hostname;
+    document.getElementById("editorNote").value = "";
+  };
+  document.getElementById("editorSave").onclick = () => {
+    const newLabel = document.getElementById("editorLabel").value.trim();
+    const newNote = document.getElementById("editorNote").value.trim();
+    d.label = newLabel && newLabel !== d.hostname ? newLabel : null;
+    d.note = newNote || null;
+
+    // Update the SVG text elements for this node
+    d3.selectAll(".node-group").filter(n => n.id === d.id).each(function() {
+      const g = d3.select(this);
+      g.select(".node-label").text(d.label || d.hostname);
+      g.select(".node-note").text(d.note ? `📝 ${d.note.slice(0, 20)}${d.note.length > 20 ? "…" : ""}` : "");
+    });
+
+    // If this node is selected, refresh the device panel
+    if (selectedNode && selectedNode.id === d.id) {
+      selectedNode = d;
+      document.getElementById("deviceDetail").innerHTML = renderDeviceDetail(d);
+    }
+
+    close();
+  };
+
+  // Close on click outside editor
+  const outsideClick = (ev) => {
+    if (!editor.contains(ev.target)) {
+      close();
+      document.removeEventListener("mousedown", outsideClick);
+    }
+  };
+  setTimeout(() => document.addEventListener("mousedown", outsideClick), 100);
+
+  // Focus label input
+  setTimeout(() => document.getElementById("editorLabel").focus(), 50);
 }
 
 // ── Node interaction ───────────────────────────────────────────
@@ -252,8 +717,6 @@ function selectNode(d) {
   selectedNode = d;
   devicePanel.classList.remove("hidden");
   document.getElementById("deviceDetail").innerHTML = renderDeviceDetail(d);
-
-  // Highlight selected node
   d3.selectAll(".node-circle").classed("selected", n => n.id === d.id);
 }
 
@@ -269,7 +732,9 @@ function renderDeviceDetail(d) {
 
   let html = `
     <div class="mb-4">
-      <div class="font-bold text-lg" style="color:${col}">${d.hostname}</div>
+      <div class="font-bold text-lg" style="color:${col}">${d.label || d.hostname}</div>
+      ${d.label ? `<div class="text-xs text-slate-400 dark:text-slate-500 font-mono">${d.hostname}</div>` : ""}
+      ${d.note ? `<div class="mt-1 text-xs text-amber-500 italic">📝 ${d.note}</div>` : ""}
       <div class="text-xs text-slate-500 dark:text-slate-400 mt-1">${d.vendor} · ${d.device_type} · <span class="font-mono bg-slate-100 dark:bg-slate-700 px-1 py-0.5 rounded">${d.filename}</span></div>
     </div>
     <div class="space-y-2 max-h-64 overflow-y-auto scrollbar-hide pr-1">
@@ -282,7 +747,6 @@ function renderDeviceDetail(d) {
       const isUp = i.status === "up";
       const statusColor = isUp ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800" : "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400 border-rose-200 dark:border-rose-800";
       const dotColor = isUp ? "bg-emerald-500" : "bg-rose-500";
-      
       html += `
         <div class="p-2 rounded-md border ${statusColor} text-xs">
           <div class="flex items-center justify-between mb-1">
@@ -303,15 +767,19 @@ function renderDeviceDetail(d) {
 function showTooltip(e, d) {
   const ifaces = d.interfaces || [];
   const upCount = ifaces.filter(i => i.status === "up").length;
+  const label = d.label ? `<div class="text-xs text-amber-400 font-mono">${d.hostname}</div>` : "";
   tooltip.innerHTML = `
-    <div class="font-bold text-sm mb-1">${d.hostname}</div>
-    <div class="flex flex-col gap-0.5 opacity-90">
+    <div class="font-bold text-sm mb-0.5">${d.label || d.hostname}</div>
+    ${label}
+    <div class="flex flex-col gap-0.5 opacity-90 mt-1">
       <div><span class="opacity-70">Type:</span> ${d.device_type}</div>
       <div><span class="opacity-70">Vendor:</span> ${d.vendor}</div>
       <div><span class="opacity-70">Interfaces:</span> ${ifaces.length} (${upCount} up)</div>
+      ${d.note ? `<div class="mt-1 text-amber-400 italic text-[10px]">📝 ${d.note}</div>` : ""}
     </div>
+    ${linkEditMode ? '<div class="mt-1.5 text-amber-400 text-[10px] font-medium">Click & drag to start a link</div>' : '<div class="mt-1.5 text-slate-400 text-[10px]">Double-click to edit label</div>'}
   `;
-  tooltip.classList.remove('hidden');
+  tooltip.classList.remove("hidden");
   moveTooltip(e);
 }
 
@@ -322,7 +790,7 @@ function moveTooltip(e) {
 }
 
 function hideTooltip() {
-  tooltip.classList.add('hidden');
+  tooltip.classList.add("hidden");
 }
 
 // ── Helpers ────────────────────────────────────────────────────
