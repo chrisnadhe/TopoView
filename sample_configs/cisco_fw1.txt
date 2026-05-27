@@ -1,0 +1,22 @@
+hostname FW1
+!
+interface GigabitEthernet0/0
+ description Link-to-R3
+ ip address 10.0.34.2 255.255.255.0
+ nameif outside
+ security-level 0
+ no shutdown
+!
+interface GigabitEthernet0/1
+ description DMZ-Network
+ ip address 172.16.0.1 255.255.255.0
+ nameif dmz
+ security-level 50
+ no shutdown
+!
+interface GigabitEthernet0/2
+ description Inside-Network
+ ip address 10.10.0.1 255.255.255.0
+ nameif inside
+ security-level 100
+ no shutdown

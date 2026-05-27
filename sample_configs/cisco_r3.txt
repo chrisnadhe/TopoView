@@ -1,0 +1,15 @@
+hostname R3
+!
+interface GigabitEthernet0/0
+ description Link-to-R2
+ ip address 10.0.23.2 255.255.255.0
+ no shutdown
+!
+interface GigabitEthernet0/1
+ description Link-to-FW1
+ ip address 10.0.34.1 255.255.255.0
+ no shutdown
+!
+router ospf 1
+ network 10.0.23.0 0.0.0.255 area 0
+ network 10.0.34.0 0.0.0.255 area 0
